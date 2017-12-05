@@ -59,4 +59,111 @@ public ConcurrentHashMap(int initialCapacity,
 }
 ```
 
+## 内部类
+Traverser
+```java
+static class Traverser<K,V>
+```
+###内部变量
+```java
+Node<K,V>[] tab;        // current table; updated if resized
+Node<K,V> next;         // the next entry to use
+TableStack<K,V> stack, spare; // to save/restore on ForwardingNodes
+int index;              // index of bin to use next
+int baseIndex;          // current index of initial table
+int baseLimit;          // index bound for initial table
+final int baseSize;     // initial table size
+```
+
+## 主要方法
+### 检索方法
+#### get
+由于ConcurrentHashMap不支持null作为key/value，返回null即表示不存在指定key对应的value，这一点和HashMap不同。下面先贴一下整体代码，再逐步分析具体实现。
+```java
+public V get(Object key) {
+    Node<K,V>[] tab; Node<K,V> e, p; int n, eh; K ek;
+    int h = spread(key.hashCode());
+    if ((tab = table) != null && (n = tab.length) > 0 &&
+        (e = tabAt(tab, (n - 1) & h)) != null) {
+        if ((eh = e.hash) == h) {
+            if ((ek = e.key) == key || (ek != null && key.equals(ek)))
+                return e.val;
+        }
+        else if (eh < 0)
+            return (p = e.find(h, key)) != null ? p.val : null;
+        while ((e = e.next) != null) {
+            if (e.hash == h &&
+                ((ek = e.key) == key || (ek != null && key.equals(ek))))
+                return e.val;
+        }
+    }
+    return null;
+}
+```
+下面对get方法源码做一下简单的分析:
+
+首先看内部方法spread，主要是一些位操作，目的是使数据更分散，减少碰撞。
+因为在插入元素时会调用spread方法对key的哈希值进行处理，因此检索元素时也需要调用本方法来保证一致性。
+* 1.将h的高16位和低16位作异或操作，兼顾高位和低位数据来增加结果的随机性以减少碰撞发生。如果没有这一步操作，在哈希表长度较小时，通过哈希值和数组长度计算下标的操作将不会利用高位数据，这样就可能会增加数据碰撞的几率。
+* -- h ^ (h >>> 16)
+* 2.将操作1的结果和0x7fffffff做与操作置最高位为0，保证结果一定是整数。这是因为负数值有特殊的用途(比如ForwardingNode的哈希值固定为-1)
+* -- (h ^ (h >>> 16)) & HASH_BITS
+```java
+static final int HASH_BITS = 0x7fffffff; // usable bits of normal node hash
+
+static final int spread(int h) {
+    return (h ^ (h >>> 16)) & HASH_BITS;
+}
+```
+***
+接着是针对哈希表的一些判断，首先检查哈希表是否不为空，接着看key哈希值(处理后)对应的数组下标是否存在mapping元素。如果两者都不满足，就直接返回null。
+```java
+if ((tab = table) != null && (n = tab.length) > 0 &&
+   (e = tabAt(tab, (n - 1) & h)) != null) 
+```
+***
+最后就是在对应下标查找元素的过程了。代码如下:
+首先会检查当前下标对应的首节点是否就是要找的节点，是就直接返回首节点，否则遍历当前下标下的Node链表/红黑树查找指定key对应的mapping节点。
+```java
+if ((eh = e.hash) == h) {
+  if ((ek = e.key) == key || (ek != null && key.equals(ek)))
+      return e.val;
+}
+else if (eh < 0)
+  return (p = e.find(h, key)) != null ? p.val : null;
+while ((e = e.next) != null) {
+  if (e.hash == h &&
+      ((ek = e.key) == key || (ek != null && key.equals(ek))))
+      return e.val;
+}
+```
+#### containsKey
+该方法直接调用get方法并判断其返回值。
+```java
+public boolean containsKey(Object key) {
+    return get(key) != null;
+}
+```
+#### containsValue
+该方法需要遍历整个map，效率会比containsKey慢很多(根据key查找可以根据哈希值直接命中对应的哈希表下标，查找范围会小很多)。
+这里重点关注内部类Traverser
+```java
+public boolean containsValue(Object value) {
+    if (value == null)
+        throw new NullPointerException();
+    Node<K,V>[] t;
+    if ((t = table) != null) {
+        Traverser<K,V> it = new Traverser<K,V>(t, t.length, 0, t.length);
+        for (Node<K,V> p; (p = it.advance()) != null; ) {
+            V v;
+            if ((v = p.val) == value || (v != null && value.equals(v)))
+                return true;
+        }
+    }
+    return false;
+}
+
+```
+
+
 
