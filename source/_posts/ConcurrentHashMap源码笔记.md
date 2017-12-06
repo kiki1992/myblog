@@ -60,11 +60,97 @@ public ConcurrentHashMap(int initialCapacity,
 ```
 
 ## 内部类
+Node -- 键/值映射
+> 1.本类不支持对value的修改，适用于只读遍历。
+> 2.哈希值为负数的子类有特殊用途，如TreeNode,ForwardingNode等。
+
+```java
+static class Node<K,V> implements Map.Entry<K,V>
+```
+#### 内部变量
+```java
+final int hash; // 哈希值
+final K key; // 键
+volatile V val; // 值 volatile保证值总是最新的
+volatile Node<K,V> next; // 下一节点 volatile保证next的变化总是能立即反映
+```
+#### 重要方法/构造器
+```java
+// 不支持value修改
+public final V setValue(V value) {
+    throw new UnsupportedOperationException();
+}
+
+// find方法默认实现，在子类中重写
+Node<K,V> find(int h, Object k) {
+    Node<K,V> e = this;
+    if (k != null) {
+        do {
+            K ek;
+            if (e.hash == h &&
+                ((ek = e.key) == k || (ek != null && k.equals(ek))))
+                return e;
+        } while ((e = e.next) != null);
+    }
+    return null;
+}
+```
+***
+ForwardingNode -- 临时转发节点
+> 1.本类是Node类的一个特殊子类，哈希值固定-1，仅存在于扩容过程中。
+> 2.插入该节点代表原table的节点已经移动至新的table，新table通过.nextTable获取。
+> 3.遍历操作过程中发现此类型节点会使遍历操作转发至新table，put操作过程中发现此类型节点则可以协助扩容。
+
+#### 内部变量
+```java
+final Node<K,V>[] nextTable; // 指向新table -- final修饰保证指向一经确定不会改变
+```
+#### 重要方法/构造器
+```java
+// 除了哈希值固定-1以外，其它实例域都为null
+ForwardingNode(Node<K,V>[] tab) {
+    super(MOVED, null, null, null);
+    this.nextTable = tab;
+}
+
+// 重写父类的find方法，会基于新table执行查找操作
+Node<K,V> find(int h, Object k) {
+    // loop to avoid arbitrarily deep recursion on forwarding nodes
+    outer: for (Node<K,V>[] tab = nextTable;;) {
+        Node<K,V> e; int n;
+        // 先检查table或者table指定下标是否为空
+        if (k == null || tab == null || (n = tab.length) == 0 ||
+            (e = tabAt(tab, (n - 1) & h)) == null)
+            return null;
+        for (;;) {
+            int eh; K ek;
+            // 当前节点符合条件则直接返回
+            if ((eh = e.hash) == h &&
+                ((ek = e.key) == k || (ek != null && k.equals(ek))))
+                return e;
+            // 哈希值<0代表特殊节点，需要根据节点类型区分操作
+            if (eh < 0) {
+            	// 再次遇到临时转发节点，将查找操作转发至新table，否则调用节点类型对应find方法。
+                if (e instanceof ForwardingNode) {
+                    tab = ((ForwardingNode<K,V>)e).nextTable;
+                    continue outer;
+                }
+                else
+                    return e.find(h, k);
+            }
+            if ((e = e.next) == null)
+                return null;
+        }
+    }
+}
+```
+
+***
 Traverser
 ```java
 static class Traverser<K,V>
 ```
-###内部变量
+### 内部变量
 ```java
 Node<K,V>[] tab;        // current table; updated if resized
 Node<K,V> next;         // the next entry to use
@@ -123,14 +209,17 @@ if ((tab = table) != null && (n = tab.length) > 0 &&
 ```
 ***
 最后就是在对应下标查找元素的过程了。代码如下:
-首先会检查当前下标对应的首节点是否就是要找的节点，是就直接返回首节点，否则遍历当前下标下的Node链表/红黑树查找指定key对应的mapping节点。
+首先会检查当前下标对应的首节点是否就是要找的节点，是就直接返回首节点。
+接着判断首节点hash值，hash值<0说明是特殊节点(TreeNode,ForwardingNode..)，需要调用对应的find方法查找节点，hash值>=0则说明是链表节点，直接遍历查找。
 ```java
 if ((eh = e.hash) == h) {
   if ((ek = e.key) == key || (ek != null && key.equals(ek)))
       return e.val;
 }
+// 特殊节点
 else if (eh < 0)
   return (p = e.find(h, key)) != null ? p.val : null;
+// 链表节点  
 while ((e = e.next) != null) {
   if (e.hash == h &&
       ((ek = e.key) == key || (ek != null && key.equals(ek))))
