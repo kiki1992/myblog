@@ -144,21 +144,103 @@ Node<K,V> find(int h, Object k) {
     }
 }
 ```
-
 ***
 Traverser
+> 1.本类为ConcurrnetHashMap的一些方法提供遍历支持，例如ContainsValue，同时也是其它iterator和spliterator的基类。
+> 2.通常，遍历操作是挨个桶执行的。但是如果发生了扩容操作，那就需要遍历新table中的两个桶，分别是下标为当前index的桶和下标为index+baseSize的桶。这是因为table扩容后会重新计算原桶中元素的下标，这会使部分元素被分配到index+baseSize的桶中。
 ```java
 static class Traverser<K,V>
 ```
-### 内部变量
+#### 内部变量
 ```java
-Node<K,V>[] tab;        // current table; updated if resized
-Node<K,V> next;         // the next entry to use
-TableStack<K,V> stack, spare; // to save/restore on ForwardingNodes
-int index;              // index of bin to use next
-int baseIndex;          // current index of initial table
-int baseLimit;          // index bound for initial table
-final int baseSize;     // initial table size
+Node<K,V>[] tab;        // 当前遍历的table，扩容时会更新
+Node<K,V> next;         // 下一节点
+TableStack<K,V> stack, spare; // 遇到ForwardingNode时保存/恢复原table
+int index;              // 下一个桶的位置
+int baseIndex;          // table初始index
+int baseLimit;          // table初始index上限
+final int baseSize;     // table初始大小
+```
+#### 重要方法/构造器
+
+```java
+// 尝试获取下一个节点元素，如果遇到ForwardingNode会保存当前遍历的table信息，并在完成新table指定位置遍历后恢复之前保存的table信息。 
+final Node<K,V> advance() {
+    Node<K,V> e;
+    // 尝试获取下一节点
+    if ((e = next) != null)
+        e = e.next;
+    for (;;) {
+        Node<K,V>[] t; int i, n;  // must use locals in checks
+        // 获取到非null节点则直接返回
+        if (e != null)
+            return next = e;
+        // 边界检验--如果当前遍历的table为空或者已经完成遍历则直接返回null
+        if (baseIndex >= baseLimit || (t = tab) == null ||
+            (n = t.length) <= (i = index) || i < 0)
+            return next = null;
+        // 尝试获取接下来需要遍历的桶
+        // 如果桶非空并且桶内存放的是特殊节点则进行特殊处理    
+        if ((e = tabAt(t, i)) != null && e.hash < 0) {
+        	// 如果桶内存放了ForwardingNode，则保存当前遍历table状态并将遍历操作转发到新table
+            if (e instanceof ForwardingNode) {
+                tab = ((ForwardingNode<K,V>)e).nextTable;
+                e = null;
+                pushState(t, i, n);
+                continue;
+            }
+        	// 如果桶内存放了TreeBin，则获取红黑树链表形式的头节点进行遍历
+            else if (e instanceof TreeBin)
+                e = ((TreeBin<K,V>)e).first;
+        	// 其它节点(ReservationNode)，没有实际数据
+            else
+                e = null;
+        }
+        // table遍历状态保存栈不为空，则尝试出栈操作，前提是已经遍历玩当前table的两个桶
+        if (stack != null)
+            recoverState(n);
+        // 标记下一个需要遍历的桶下标，在当前桶遍历完成之后才会用到新的index
+        else if ((index = i + baseSize) >= n)
+            index = ++baseIndex; // visit upper slots if present
+    }
+}
+
+// 当获取到ForwardingNode时保存当前遍历table状态
+private void pushState(Node<K,V>[] t, int i, int n) {
+	 // 如果spare不为null，则复用为栈顶
+    TableStack<K,V> s = spare;  // reuse if possible
+    if (s != null)
+        spare = s.next;
+    else
+        s = new TableStack<K,V>();
+    // 保存当前table的遍历状态会执行入栈操作
+    s.tab = t;
+    s.length = n;
+    s.index = i;
+    s.next = stack;
+    stack = s;
+}
+
+// 尝试恢复上一次保存的table遍历状态，前提是已经完成当前table两个桶的遍历
+private void recoverState(int n) {
+    TableStack<K,V> s; int len;
+    // index += (len = s.length)) >= n 表示当前table没有下一个需要遍历的桶了
+    while ((s = stack) != null && (index += (len = s.length)) >= n) {
+    // 恢复栈顶保存的table遍历状态，并将出栈元素保存在spare中以便复用
+        n = len;
+        index = s.index;
+        tab = s.tab;
+        s.tab = null;
+        TableStack<K,V> next = s.next;
+        s.next = spare; // save for reuse
+        stack = next;
+        spare = s;
+    }
+    // 标记下一个需要遍历的桶下标，在当前桶遍历完成之后才会用到新的index
+    if (s == null && (index += baseSize) >= n)
+        index = ++baseIndex;
+}
+
 ```
 
 ## 主要方法
