@@ -9,5 +9,7 @@ tags: [Git,日常记录]
 
 先贴张图看看都报啥错了
 ![sourceTree报错信息](/myblog/images/sourceTreeErr.png)
-
+主要看这句话：insufficient permission for adding an object to repository database .git/objects
+貌似.git目录下的文件权限不够，通过命令行看看文件权限
+![.git目录下的文件权限](/images/macOwn.png)
 
