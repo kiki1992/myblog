@@ -1,7 +1,7 @@
 ---
-title: ConcurrentHashMap源码笔记
+title: ConcurrentHashMap源码笔记（龟速更新中）
 date: 2017-12-02 17:56:32
-summary: 本篇对ConcurrentHashMap接口源码做了简单分析及整理
+summary: 本篇对ConcurrentHashMap源码做了简单分析及整理
 tags: Java Collections Framework
 ---
 
