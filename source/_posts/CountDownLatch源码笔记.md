@@ -92,3 +92,176 @@ public void countDown() {
 	sync.releaseShared(1);
 }
 ```
+
+## 编码实例
+这里针对上面提到的两个应用场景给出了简单的代码实例。
+#### 一个简单的开关
+
+代码比较简单，直接看注释就可以了。
+
+```java
+public class CountDownLatchDemo1 {
+
+    private static final int waitThreadsCount = 5;
+
+    public static void main(String[] args) {
+
+        // 创建一个计数器
+        CountDownLatch countDownLatch = new CountDownLatch(1);
+
+        // 创建等待闸门开放的线程
+        for (int count = 0; count < waitThreadsCount; count++) {
+
+            new Thread(() -> {
+                System.out.println(Thread.currentThread().getName() + " waiting...");
+                try {
+                    countDownLatch.await();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                    return;
+                }
+                System.out.println(Thread.currentThread().getName() + " passed through!");
+            } ).start();
+
+        }
+
+        // 主线程睡眠2s后打开闸门
+        try {
+            Thread.sleep(2000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+        // 主线程打开闸门
+        System.out.println("############################");
+        System.out.println(Thread.currentThread().getName() + " open the gate!");
+        System.out.println("############################");
+        countDownLatch.countDown();
+
+    }
+}
+```
+
+下面是代码运行的结果：
+![CountDownLatchDemo1运行结果](/myblog/images/CountDownLatchDemo1Result.png)
+可以看到等待闸门打开的线程的确在执行countDown处理后恢复运行了。
+***
+#### 一个等待其他相关任务全部完成才能执行的任务
+
+这里模拟了一个关机的过程，主程序必须等待关闭应用和清理工作完成后才能执行最后的关机任务。
+
+首先定义一个相关任务基类。子类只需要实现doWork方法即可。
+
+```java
+public abstract class BaseTaskWorker implements Runnable{
+
+    private String workName;
+    private boolean finished;
+    private CountDownLatch countDownLatch;
+
+    public BaseTaskWorker(String workName, CountDownLatch countDownLatch) {
+        this.workName = workName;
+        this.countDownLatch = countDownLatch;
+    }
+
+    @Override
+    public void run() {
+
+        try {
+            doWork();
+        } finally {
+            if (countDownLatch != null) {
+                countDownLatch.countDown();
+            }
+        }
+    }
+
+    public String getWorkName() {
+            return this.workName;
+    }
+
+    public abstract void doWork();
+
+}
+```
+
+下面是两个具体的相关任务实现类。
+
+首先是模拟应用关闭任务的实现类，这里让线程睡眠2s来模拟关闭应用的过程。
+
+```java
+public class CloseAppTaskWorker extends BaseTaskWorker{
+
+    public CloseAppTaskWorker(CountDownLatch countDownLatch) {
+        super("CloseAppTaskWorker", countDownLatch);
+    }
+
+    @Override
+    public void doWork() {
+        System.out.println(getWorkName() + " start!");
+        try {
+            Thread.sleep(2000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        System.out.println(getWorkName() + " normal end!");
+    }
+}
+```
+
+然后是模拟清理任务的实现类，这里同样通过线程睡眠的方式模拟清理的过程。
+
+```java
+public class CleanUpTaskWorker extends BaseTaskWorker{
+
+    public CleanUpTaskWorker(CountDownLatch countDownLatch) {
+        super("CleanUpTaskWorker", countDownLatch);
+    }
+
+    @Override
+    public void doWork() {
+        System.out.println(getWorkName() + " start!");
+        try {
+            Thread.sleep(3000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        System.out.println(getWorkName() + " normal end!");
+    }
+}
+```
+
+最后是模拟关机过程的主线程。主线程会在所有相关任务都完成后执行关机操作。
+
+```java
+public class CountDownLatchDemo2 {
+
+
+    private static final int taskWorkerCount = 2;
+
+    public static void main(String[] args) {
+
+        CountDownLatch countDownLatch = new CountDownLatch(taskWorkerCount);
+
+        List<BaseTaskWorker>  taskWorkerList = new ArrayList(taskWorkerCount);
+        taskWorkerList.add(new CloseAppTaskWorker(countDownLatch));
+        taskWorkerList.add(new CleanUpTaskWorker(countDownLatch));
+
+        for (BaseTaskWorker taskWorker : taskWorkerList) {
+            new Thread(taskWorker).start();
+        }
+
+        System.out.println("waiting for task workers...");
+        try {
+            countDownLatch.await();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        System.out.println("ready for shutdown!");
+    }
+}
+```
+
+下面是代码运行的结果：
+![CountDownLatchDemo1运行结果](/myblog/images/CountDownLatchDemo2Result.png)
+可以看到主线程确实是在应用关闭和清理任务都完成之后才恢复运行的。
