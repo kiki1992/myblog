@@ -1,3 +1,10 @@
+---
+title: CountDownLatch源码笔记
+date: 2017-12-14 13:11:32
+summary: 本篇对CountDownLatch源码做了简单分析及整理
+tags: 多线程
+---
+
 # CountDownLatch源码笔记
 ## 主要特性
 > * 1.CountDownLatch是并发编程的一个辅助类，允许一个或多个线程等待一组特定线程完成某项任务后再执行。
