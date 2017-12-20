@@ -1,7 +1,7 @@
 ---
-title: Logback使用详解（更新中）
+title: Logback使用笔记（更新中 最后更新时间2017-12-20）
 date: 2017-12-18 11:11:32
-summary: 本篇围绕Logback的配置展开对其使用方法的详细说明。
+summary: 本篇围绕Logback的配置展开对其使用方法的简单说明。
 tags: 日志框架
 ---
 
@@ -129,7 +129,6 @@ java -Dlogpath="/home/demo/app.log" MyApp
 <insertFromJNDI env-entry-name="java:comp/env/appName" as="appName" scope="system" />
 ...
 ```
-
 #### 变量值替换
 **普通替换**
 变量值替换使用${}标签，配置例如下：
@@ -159,4 +158,22 @@ java -Dlogpath="/home/demo/app.log" MyApp
 <logger name="${${demoLogger}.name}" level="${${demoLogger}.level}">
 </logger>
 ...
+```
+#### 变量作用域
+使用xml配置变量时可以指定变量的作用域，指定时使用scope属性。scope的取值可以是local,context,system，默认为local。
+以下是对各个作用域的简单描述：
+***local: ***定义为local作用域的变量只在当前配置文件有效。
+***context: ***定义为context作用域的变量在整个上下文生命周期内有效。
+***system: ***定义为system作用域的变量会作为JVM的系统变量，因此在JVM运行期间都有效。
+**Logback替换变量时的搜索顺序: **local->context->system->OS(系统环境变量)
+
+#### 默认变量
+Logback默认会自动添加两个变量，分别是HOSTNAME和CONTEXT_NAME，其中CONTEXT_NAME的取值可以通过contextName标签来自定义配置，**自定义配置的好处是：当有多个应用使用同一个logger输出日志时，可以方便地区分是哪个应用输出的日志。**。
+自定义CONTEXT_NAME的例子如下:
+```xml
+<configuration>
+...
+  <contextName>myAPP</contextName>
+...
+</configuration>
 ```
