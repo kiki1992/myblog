@@ -1,10 +1,13 @@
 ---
-title: Executor&ExecutorService源码笔记
+title: Executor相关接口源码笔记
 date: 2017-12-20 12:02:32
-summary: 本篇对Executor及ExecutorService接口源码做了简单分析及整理。
+summary: 本篇对Executor及相关接口源码做了简单分析及整理。
 tags: 多线程
 ---
 ## Executor接口
+```java
+public interface Executor 
+```
 ### 概要
 > * Executor用于执行提交的任务，而这些任务所对应的类都应该实现Runnable接口。利用Executor可以将提交任务的过程与具体执行任务的过程解耦。包括任务的具体执行机制，线程的使用细节，调度机制等等都可以依赖于Executor的具体实现。
 > * Executor通常可以用来替代显示创建线程的操作，比如下面这个例子：
@@ -43,6 +46,9 @@ void execute(Runnable command);
 
 
 ## ExecutorService接口
+```java
+public interface ExecutorService extends Executor
+```
 ### 概要
 > * ExecutorService接口继承自Executor接口，提供了管理结束以及返回Future来追踪一个或多个异步任务的方法。
 > * ExecutorService可以被关闭，关闭将导致之后提交的任务被拒绝。有两种关闭ExecutorService的方法：调用shutDown方法允许正在执行的任务继续执行但会拒绝新提交的任务，而调用shutDownNow方法则会尝试中止正在执行的任务。当ExecutorService到达关闭状态以后，将不会有正在执行或等待执行的任务，新的任务也将无法被提交。一个无用或者使用完毕的ExecutorService需要被关闭以释放相关资源。
@@ -121,10 +127,43 @@ Future<?> submit(Runnable task);
     throws InterruptedException, ExecutionException, TimeoutException;
 ```
 
+## ScheduledExecutorService接口
+```java
+public interface ScheduledExecutorService extends ExecutorService 
+```
+### 概要
+> * ScheduledExecutorService继承自ExecutorService，定义了任务的延时/定时执行方法。
+> * schedule相关方法会延时创建任务并返回一个可供取消/检查执行的ScheduledFuture对象。如果指定延时时间<=0则任务会被立即创建并执行。
+> * 在schedule相关方法中，scheduleAtFixedRate和scheduleWithFixedDelay会定期创建及执行任务直到取消或者其它导致定时任务无法继续的情况发生。
+> * 另外，所有schedule相关方法都以相对时间作为参数而非绝对时间或日期。其执行不依赖于系统时间，这也是和Timer类不同的地方。另外Timer不会捕获执行任务中发生的异常，因此如果任务类中抛出异常将导致同一Timer管理的任务全部无法继续执行。而ScheduledExecutorService中一个任务的异常中止不会对其它任务产生影响。
 
-
-
-    
+### 主要方法
+**schedule**
+schedule方法用于创建延时执行任务，支持Runnable/Callable实现类作为指定任务。
+```java
+public ScheduledFuture<?> schedule(Runnable command,
+                                   long delay, TimeUnit unit);
+public <V> ScheduledFuture<V> schedule(Callable<V> callable,
+                                       long delay, TimeUnit unit);                                   
+```
+**scheduleAtFixedRate**   
+scheduleAtFixedRate用于创建按照指定时间间隔执行的任务。这里的时间间隔并非绝对，当某次任务执行时间超过时间间隔时，该任务下一次执行会等本次执行完成后开始，而不是并行执行。
+如果某次任务执行过程中发生异常，该任务的后续执行计划会被抑制。
+如果需要中止任务计划，可以使用ScheduledFuture取消任务或者关闭ScheduledExecutorService。
+```java
+public ScheduledFuture<?> scheduleAtFixedRate(Runnable command,
+                                              long initialDelay,
+                                              long period,
+                                              TimeUnit unit);
+```
+**scheduleWithFixedDelay**
+scheduleWithFixedDelay用于创建按照指定延时重复执行的任务，也就是说某次任务的执行会在上一次任务执行完成并经过指定延时时间后执行。本方法的其它特性和scheduleAtFixedRate类似。
+```java
+public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
+                                                 long initialDelay,
+                                                 long delay,
+                                                 TimeUnit unit);
+```
 
 
 
