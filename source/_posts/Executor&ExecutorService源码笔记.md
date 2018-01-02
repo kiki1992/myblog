@@ -11,30 +11,30 @@ public interface Executor
 ### 概要
 > * Executor用于执行提交的任务，而这些任务所对应的类都应该实现Runnable接口。利用Executor可以将提交任务的过程与具体执行任务的过程解耦。包括任务的具体执行机制，线程的使用细节，调度机制等等都可以依赖于Executor的具体实现。
 > * Executor通常可以用来替代显示创建线程的操作，比如下面这个例子：
-> 
- ```java
+>
+```java
   // 显示创建线程
   new Thread(new RunnableTask()).start();
   // 通过Executor隐藏线程创建细节
   Executor executor = someExecutor;
   executor.execute(new RunnableTask());
- ```
+```
 > * Executor接口并没有强制要求执行的过程必须是异步完成的。因此，可以像下面的例子那样直接在execute方法调用线程上立即执行提交的任务。
- ```java
+```java
  class DirectExecutor implements Executor {
  	public void execute(Runnable r) {
  		r.run();
   	}
  }
- ```
+```
 > * 当然，你还可以像下面这样为每一个任务创建一个新的线程。
- ```java
+```java
   class ThreadPerTaskExecutor implements Executor {
     public void execute(Runnable r) {
       new Thread(r).start();
     }
   }
- ```
+```
 >  *注：以上例子摘自官方API文档
 
 ### 主要方法
@@ -167,4 +167,235 @@ public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
 
 
 
+## AbstractExecutorService接口
+```java
+public abstract class AbstractExecutorService implements ExecutorService
+```
+### 概要
+> * 提供了对ExecutorService接口部分方法的默认实现。
 
+### 主要方法
+**newTaskFor**
+将Runnable或Callable实现类对象包装成RunnableFuture接口实现类对象。返回的RunnableFuture拥有执行任务，任务取消以及执行结果获取的功能。
+默认实现返FutureTask，可以通过重写newTaskFor方法返回自定义的RunnableFuture实现类对象。
+```java
+protected <T> RunnableFuture<T> newTaskFor(Runnable runnable, T value) {
+        return new FutureTask<T>(runnable, value);
+}
+protected <T> RunnableFuture<T> newTaskFor(Callable<T> callable) {
+        return new FutureTask<T>(callable);
+}
+```
+
+**submit**
+submit方法的所有默认实现都会调用newTaskFor方法对传入的Runnable或Callable实现类对象进行包装，然后调用execute执行任务。
+```java
+public Future<?> submit(Runnable task) {
+  if (task == null) throw new NullPointerException();
+  RunnableFuture<Void> ftask = newTaskFor(task, null);
+  execute(ftask);
+  return ftask;
+}
+public <T> Future<T> submit(Runnable task, T result) {
+  if (task == null) throw new NullPointerException();
+  RunnableFuture<T> ftask = newTaskFor(task, result);
+  execute(ftask);
+  return ftask;
+}
+public <T> Future<T> submit(Callable<T> task) {
+  if (task == null) throw new NullPointerException();
+  RunnableFuture<T> ftask = newTaskFor(task);
+  execute(ftask);
+  return ftask;
+}
+```
+**invokeAny**
+对ExecutorService的invokeAny方法的默认实现，其中调用了内部方法doInvokeAny，主要逻辑参考invokeAny。
+```java
+public <T> T invokeAny(Collection<? extends Callable<T>> tasks)
+	throws InterruptedException, ExecutionException {
+  try {
+  	return doInvokeAny(tasks, false, 0);
+  } catch (TimeoutException cannotHappen) { // 非超时等待，因此不可能发生超时异常
+  	assert false;
+  	return null;
+  }
+}
+
+public <T> T invokeAny(Collection<? extends Callable<T>> tasks,
+	long timeout, TimeUnit unit)
+	throws InterruptedException, ExecutionException, TimeoutException {
+	return doInvokeAny(tasks, true, unit.toNanos(timeout));
+}
+```
+**doInvokeAny**
+doInvokeAny方法内部利用ExecutorCompletionService来执行任务，并使用其poll，take方法来获取任务的执行结果。这样就可以在有任何一个任务执行完成后立即获得结果。
+```java
+    private <T> T doInvokeAny(Collection<? extends Callable<T>> tasks,
+                              boolean timed, long nanos)
+        throws InterruptedException, ExecutionException, TimeoutException {
+        if (tasks == null)
+            throw new NullPointerException();
+        int ntasks = tasks.size();
+        if (ntasks == 0)
+            throw new IllegalArgumentException();
+        ArrayList<Future<T>> futures = new ArrayList<Future<T>>(ntasks);
+        ExecutorCompletionService<T> ecs =
+            new ExecutorCompletionService<T>(this);
+
+        // For efficiency, especially in executors with limited
+        // parallelism, check to see if previously submitted tasks are
+        // done before submitting more of them. This interleaving
+        // plus the exception mechanics account for messiness of main
+        // loop.
+
+        try {
+            // Record exceptions so that if we fail to obtain any
+            // result, we can throw the last exception we got.
+            ExecutionException ee = null;
+            final long deadline = timed ? System.nanoTime() + nanos : 0L;
+            Iterator<? extends Callable<T>> it = tasks.iterator();
+
+            // Start one task for sure; the rest incrementally
+            futures.add(ecs.submit(it.next()));
+            --ntasks;
+            int active = 1;
+
+            for (;;) {
+            	// 循环会首先检查是否已经有执行完成的任务
+                Future<T> f = ecs.poll();
+                if (f == null) {
+                    // 还有待执行的任务存在时一定会首先执行待完成任务
+                    if (ntasks > 0) {
+                        --ntasks;
+                        futures.add(ecs.submit(it.next()));
+                        ++active;
+                    }
+                    // 如果已经没有执行中的任务(到这里一定没有待执行任务了)则退出循环
+                    else if (active == 0)
+                        break;
+                    // 超时等待处理--实际超时时间肯定会比传入的时间长，因为存在提交执行
+                    // 任务等操作
+                    else if (timed) {
+                        f = ecs.poll(nanos, TimeUnit.NANOSECONDS);
+                        if (f == null)
+                            throw new TimeoutException();
+                        nanos = deadline - System.nanoTime();
+                    }
+                    // 非超时等待则会阻塞
+                    else
+                        f = ecs.take();
+                }
+                // 如果有执行完成的任务，则尝试获取执行结果，
+                // 获取失败会记录异常，然后继续执行其他任务或等待其他任务完成
+                if (f != null) {
+                    --active;
+                    try {
+                        return f.get();
+                    } catch (ExecutionException eex) {
+                        ee = eex;
+                    } catch (RuntimeException rex) {
+                        ee = new ExecutionException(rex);
+                    }
+                }
+            }
+
+            if (ee == null)
+                ee = new ExecutionException();
+            throw ee;
+
+        } finally {
+            // 最后会取消未完成的任务，已完成的任务调用cancel方法不会产生任何效果
+            for (int i = 0, size = futures.size(); i < size; i++)
+                futures.get(i).cancel(true);
+        }
+    }
+```
+
+**invokeAll**
+
+invokeAll方法会循环提交指定任务列表，并在提交完成后循环执行返回Future的get方法产生阻塞，以尽量保证方法返回前任务执行完成，最后未完成执行的任务会被取消。
+
+```java
+    public <T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks)
+        throws InterruptedException {
+        if (tasks == null)
+            throw new NullPointerException();
+        ArrayList<Future<T>> futures = new ArrayList<Future<T>>(tasks.size());
+        boolean done = false;
+        try {
+            // 循环提交待执行任务
+            for (Callable<T> t : tasks) {
+                RunnableFuture<T> f = newTaskFor(t);
+                futures.add(f);
+                execute(f);
+            }
+            // 循环获取执行结果，这里只是为了阻塞，取得的结果并不会被使用
+            for (int i = 0, size = futures.size(); i < size; i++) {
+                Future<T> f = futures.get(i);
+                if (!f.isDone()) {
+                    try {
+                        f.get(); // 阻塞保证任务执行完成才能返回
+                    } catch (CancellationException ignore) {
+                    } catch (ExecutionException ignore) {
+                    }
+                }
+            }
+            done = true;
+            return futures;
+        } finally {
+            if (!done)
+                for (int i = 0, size = futures.size(); i < size; i++)
+                    futures.get(i).cancel(true);
+        }
+    }
+    public <T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks,
+                                         long timeout, TimeUnit unit)
+        throws InterruptedException {
+        if (tasks == null)
+            throw new NullPointerException();
+        long nanos = unit.toNanos(timeout);
+        ArrayList<Future<T>> futures = new ArrayList<Future<T>>(tasks.size());
+        boolean done = false;
+        try {
+            for (Callable<T> t : tasks)
+                futures.add(newTaskFor(t));
+
+            final long deadline = System.nanoTime() + nanos;
+            final int size = futures.size();
+
+            // Interleave time checks and calls to execute in case
+            // executor doesn't have any/much parallelism.
+            // 循环提交待执行任务并检查超时时间
+            for (int i = 0; i < size; i++) {
+                execute((Runnable)futures.get(i));
+                nanos = deadline - System.nanoTime();
+                if (nanos <= 0L)
+                    return futures;
+            }
+
+            for (int i = 0; i < size; i++) {
+                Future<T> f = futures.get(i);
+                if (!f.isDone()) {
+                    if (nanos <= 0L)
+                        return futures;
+                    try {
+                        f.get(nanos, TimeUnit.NANOSECONDS); // 超时阻塞尽量保证任务完成返回
+                    } catch (CancellationException ignore) {
+                    } catch (ExecutionException ignore) {
+                    } catch (TimeoutException toe) {
+                        return futures;
+                    }
+                    nanos = deadline - System.nanoTime();
+                }
+            }
+            done = true;
+            return futures;
+        } finally {
+            // 等待超时后未执行完成的任务将会被取消
+            if (!done)
+                for (int i = 0, size = futures.size(); i < size; i++)
+                    futures.get(i).cancel(true);
+        }
+    }
+```
