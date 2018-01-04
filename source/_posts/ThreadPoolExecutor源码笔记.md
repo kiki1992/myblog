@@ -96,9 +96,456 @@ public class ThreadPoolExecutor extends AbstractExecutorService
 >     ***结束操作***
 >
 >     如果线程池在程序中不再被引用并且不存在剩余线程时将会被自动关闭。如果想要确保即使在用户忘记调用shutdown方法时线程池也能在没有引用后被回收，就需要设置恰当的keep-alive时间来确保空闲线程会最终死亡，并将核心线程数设置为0或者设置allowCoreThreadTimeOut(boolean)。
->
->     ​
->
->     ​
 
 ​	
+
+### 重要变量及内部类
+
+#### 内部类
+
+**任务拒绝策略内部实现类**
+
+所有拒绝策略类都实现了RejectedExecutionHandler接口，要实现自定义的拒绝策略只需实现同一接口即可。以下是默认定义的拒绝策略实现类：
+
+***CallerRunsPolicy -- 使用调用者线程执行任务的策略***
+
+```java
+    public static class CallerRunsPolicy implements RejectedExecutionHandler {
+        
+        public CallerRunsPolicy() { }
+
+        // 使用调用者线程执行任务，如果Executor关闭则任务被丢弃
+        public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+            if (!e.isShutdown()) {
+                r.run();
+            }
+        }
+    }
+```
+
+***AbortPolicy -- 异常抛出策略***
+
+```java
+    public static class AbortPolicy implements RejectedExecutionHandler {
+      
+        public AbortPolicy() { }
+
+        // 直接抛出RejectedExecutionException
+        public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+            throw new RejectedExecutionException("Task " + r.toString() +
+                                                 " rejected from " +
+                                                 e.toString());
+        }
+    }
+```
+
+***DiscardPolicy -- 静默丢弃策略***
+
+```java
+    public static class DiscardPolicy implements RejectedExecutionHandler {
+        
+        public DiscardPolicy() { }
+
+        // 不做任何处理，直接将任务静默丢弃
+        public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+        }
+    }
+```
+
+***DiscardOldestPolicy -- 舍弃最旧任务策略***
+
+```java
+    public static class DiscardOldestPolicy implements RejectedExecutionHandler {
+        
+        public DiscardOldestPolicy() { }
+
+        // 丢弃队列中最旧的任务并尝试重新执行任务，如果executor已经关闭则将任务丢弃
+        public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+            if (!e.isShutdown()) {
+                e.getQueue().poll();
+                e.execute(r);
+            }
+        }
+    }
+```
+
+**Worker类**
+
+Worker类的主要工作是为执行任务的线程维护中断控制状态，并提供一些简单的记录功能，例如执行完成的任务数。
+
+本类继承自AbstractQueuedSynchronizer类，利用其来简化执行各个任务时获取/释放锁的实现过程。具体是实现了一个不可重入的锁来替代ReentrantLock的使用，这样一来在其调用诸如setCorePoolSize的线程池控制方法时就无法重新获取锁了。
+
+另外，在本类中还实现了在线程真正执行任务前抑制中断操作的处理。
+
+```java
+private final class Worker
+    extends AbstractQueuedSynchronizer
+    implements Runnable
+{
+    /**
+     * This class will never be serialized, but we provide a
+     * serialVersionUID to suppress a javac warning.
+     */
+    private static final long serialVersionUID = 6138294804551838833L;
+
+    /** Thread this worker is running in.  Null if factory fails. */
+    final Thread thread;
+    /** Initial task to run.  Possibly null. */
+    Runnable firstTask;
+    /** Per-thread task counter */
+    volatile long completedTasks;
+
+    /**
+     * Creates with given first task and thread from ThreadFactory.
+     * @param firstTask the first task (null if none)
+     */
+    Worker(Runnable firstTask) {
+        setState(-1); // inhibit interrupts until runWorker
+        this.firstTask = firstTask;
+        this.thread = getThreadFactory().newThread(this);
+    }
+
+    /** Delegates main run loop to outer runWorker  */
+    public void run() {
+        runWorker(this);
+    }
+
+    // Lock methods
+    //
+    // The value 0 represents the unlocked state.
+    // The value 1 represents the locked state.
+
+    protected boolean isHeldExclusively() {
+        return getState() != 0;
+    }
+
+    protected boolean tryAcquire(int unused) {
+        if (compareAndSetState(0, 1)) {
+            setExclusiveOwnerThread(Thread.currentThread());
+            return true;
+        }
+        return false;
+    }
+
+    protected boolean tryRelease(int unused) {
+        setExclusiveOwnerThread(null);
+        setState(0);
+        return true;
+    }
+
+    public void lock()        { acquire(1); }
+    public boolean tryLock()  { return tryAcquire(1); }
+    public void unlock()      { release(1); }
+    public boolean isLocked() { return isHeldExclusively(); }
+
+    // 如果worker尚未启动，interrupt处理将被抑制
+    void interruptIfStarted() {
+        Thread t;
+        if (getState() >= 0 && (t = thread) != null && !t.isInterrupted()) {
+            try {
+                t.interrupt();
+            } catch (SecurityException ignore) {
+            }
+        }
+    }
+}
+```
+
+#### 重要变量
+
+***completedTaskCount***
+
+completedTaskCount变量用于记录任务完成数，只有当worker终止时才会更新变量值，访问此变量只能是在加锁的情况下。
+
+```java
+private long completedTaskCount;
+```
+
+***Executor容量&运行状态变量***
+
+ThreadPoolExecutor使用Integer的低29位来存储Worker数量，而高位则被用来存储Executor的运行状态。相关变量如下：
+
+```java
+// 用于存储Worker数量的位数
+private static final int COUNT_BITS = Integer.SIZE - 3; 
+// 得到低位皆为1的结果，代表Executor的最大容量
+private static final int CAPACITY   = (1 << COUNT_BITS) - 1; 
+
+// 高位用于存储Executor的运行状态
+private static final int RUNNING    = -1 << COUNT_BITS;
+private static final int SHUTDOWN   =  0 << COUNT_BITS;
+private static final int STOP       =  1 << COUNT_BITS;
+private static final int TIDYING    =  2 << COUNT_BITS;
+private static final int TERMINATED =  3 << COUNT_BITS;
+```
+
+***
+
+### 主要方法
+
+#### Hook方法
+
+ThreadPoolExecutor提供了一系列可供子类重写的Hook方法，来实现对任务执行以及Executor关闭的监控管理等操作。
+
+***beforeExecute***
+
+```java
+protected void beforeExecute(Thread t, Runnable r) { }
+```
+
+beforeExecute方法在任务执行前由执行任务的线程调用，为了能适当地处理多重嵌套重写，子类一般需要在重写方法的最后调用super.beforeExecute
+
+***afterExecute***
+
+```java
+protected void afterExecute(Runnable r, Throwable t) { }
+```
+
+afterExecute方法在任务执行完成后由执行任务的线程调用，当任务由于RuntimeException或是Error导致意外终止时，入参Throwable会被设置。为了能适当地处理多重嵌套重写，子类一般需要在重写方法的开头调用super.afterExecute。
+
+**需要注意的是：** 当执行动作被封闭在任务中时（比如FurtureTask），将由任务内部处理执行过程中的异常，因此任务不会因此而意外终止，而这些异常也将不会被传递至本方法。针对这种情况可以做一些特殊处理，比如下面这个例子：
+
+```java
+    @Override
+    protected void afterExecute(Runnable r, Throwable t) {
+        super.afterExecute(r, t);
+
+        // 如果Throwable对象没有设置，检查任务是否被包装
+        if (t == null && r instanceof Future) {
+
+            Future future = (Future) r;
+            try {
+                future.get();
+            } catch (CancellationException ce) {
+                t = ce;
+            } catch (ExecutionException ee) {
+                t = ee.getCause(); // 如果是ExecutionException，则实际异常被包装
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        if (t != null) {
+            // 如果Throwable对象存在，做某些处理
+        }
+
+    }
+```
+
+***terminated***
+
+```java
+protected void terminated() { }
+```
+
+terminated方法在Executor终止时被调用，为了能适当地处理多重嵌套重写，子类一般需要在重写方法中调用super.terminated。
+
+
+
+#### 公共方法
+
+***getCompletedTaskCount***
+
+getCompletedTaskCount方法用于获取大致的任务完成数。
+
+```java
+public long getCompletedTaskCount() {
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        long n = completedTaskCount;
+        // 由于worker中的任务完成数只有当worker终止时才会更新到completedTaskCount
+        // 这里需要遍历所有worker获得实际的任务完成数
+        for (Worker w : workers)
+            n += w.completedTasks;
+        return n;
+    } finally {
+        mainLock.unlock();
+    }
+}
+```
+
+
+
+#### 私有方法
+
+**Worker相关方法**
+
+***addWorker***
+
+addWorker方法会检查线程池状态来决定是否可以新增Worker，如果满足新增条件则新的Worker将被创建并启动，然后开始执行指定任务。如果线程池已经停止服务或者即将关闭，线程工厂创建新线程失败，则新Worker不会被创建。方法具体实现参考以下代码注释：
+
+```java
+private boolean addWorker(Runnable firstTask, boolean core) {
+    retry:
+    for (;;) {
+        int c = ctl.get();
+        int rs = runStateOf(c);
+
+        // Check if queue empty only if necessary.
+        // 新建Worker前首先会检查Executor以及队列状态
+        // 如果Executor处于关闭状态或者队列为空则不会新建Worker
+        if (rs >= SHUTDOWN &&
+            ! (rs == SHUTDOWN &&
+               firstTask == null &&
+               ! workQueue.isEmpty())) // 检查队列是否为空的操作只有当需要时才会被执行
+            return false;
+
+        for (;;) {
+            // 接着会检查当前Worker数量来判断新Worker是否应该被创建
+            int wc = workerCountOf(c);
+            if (wc >= CAPACITY ||
+                wc >= (core ? corePoolSize : maximumPoolSize))
+                return false;
+            // 尝试更新Worker数量，Worker数量或者Executor运行状态
+            // 的改变将导致更新失败。
+            if (compareAndIncrementWorkerCount(c))
+                break retry;
+            c = ctl.get();  // Re-read ctl
+            // 这里将检查Worker数量更新失败的原因，如果失败由Worker数量变化导致
+            // 将重试更新，否则重新检查Executor状态
+            if (runStateOf(c) != rs)
+                continue retry;
+            // else CAS failed due to workerCount change; retry inner loop
+        }
+    }
+
+    boolean workerStarted = false;
+    boolean workerAdded = false;
+    Worker w = null;
+    // 如果以上处理成功，则进入到新增Worker的处理
+    try {
+        w = new Worker(firstTask);
+        final Thread t = w.thread;
+        // 创建Worker后首先会检查对应线程是否被成功创建
+        if (t != null) {
+            final ReentrantLock mainLock = this.mainLock;
+            mainLock.lock();
+            try {
+                // Recheck while holding lock.
+                // Back out on ThreadFactory failure or if
+                // shut down before lock acquired.
+                // 获取锁后会重新检查Executor状态来确保其还在运行。
+                int rs = runStateOf(ctl.get());
+
+                if (rs < SHUTDOWN ||
+                    (rs == SHUTDOWN && firstTask == null)) {
+                    // 这里还会检查线程状态来确保其可以启动
+                    if (t.isAlive()) // precheck that t is startable
+                        throw new IllegalThreadStateException();
+                    // 如果上述检查都通过了，新增的worker将被加入全局的workers Set
+                    workers.add(w);
+                    int s = workers.size();
+                    if (s > largestPoolSize)
+                        largestPoolSize = s;
+                    workerAdded = true;
+                }
+            } finally {
+                mainLock.unlock();
+            }
+            // 最终worker将被启动
+            if (workerAdded) {
+                t.start();
+                workerStarted = true;
+            }
+        }
+    } finally {
+        // 如果新增启动Worker过程失败，以上处理将被回滚
+        if (! workerStarted)
+            addWorkerFailed(w);
+    }
+    return workerStarted;
+}
+```
+***addWorkerFailed***
+
+addWorkerFailed方法用于Worker线程创建失败后的回滚操作。主要处理如下：
+
+1.如果指定了Worker，则将其从全局的workers Set中移除
+
+2.将worker总数减1
+
+3.尝试终止Executor的操作，以防当前worker的存在阻碍Executor终止的情况发生。
+
+```java
+private void addWorkerFailed(Worker w) {
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        if (w != null)
+            workers.remove(w); // 移除当前worker
+        decrementWorkerCount(); // worker总数减1
+        tryTerminate(); // 尝试终止操作
+    } finally {
+        mainLock.unlock();
+    }
+}
+```
+
+***runWorker***
+
+runWorker方法会不断从队列中取出并执行任务，其处理过程中针对以下几个问题做了相应处理：
+
+1.***任务执行和worker销毁：***启动该方法时通常已经指定了初始任务，此时便不会从对列中获取任务。否则就通过getTask方法从对列中获取需要执行的任务。如果线程池状态改变或者其他配置发生变化导致worker需要结束则其将被正常销毁，而如果是因为内部代码抛出异常导致worker需要结束也会有相应的销毁处理。需要如何销毁将由内部变量completedAbruptly的记录值决定。
+
+2.***任务执行干扰：***在执行任务之前程序就首先获得锁来保证除线程池停止以外，任务执行线程都不会被设置为中断状态。
+
+3.***beforeExecute异常：***所有任务执行之前都会首先调用beforeExecute方法，如果此方法抛出异常，任务将不会被执行，worker也将被销毁。
+
+4.***任务执行异常：***如果beforeExecute方法正常结束，任务将被最终执行。而执行过程中产生的异常会被记录并传递至afterExecute方法，RuntimeException、Error以及其他Throwables会被区分处理。任何thrown异常都将导致worker被销毁。
+
+5.***afterExecute异常：***afterExecutte方法抛出异常也将导致worker被销毁。
+
+以上关于异常的处理机制也保证了我们可以为aferExecute方法或者线程的UncaughtExceptionHandler提供尽可能准确的异常信息。
+
+```java
+final void runWorker(Worker w) {
+    Thread wt = Thread.currentThread();
+    Runnable task = w.firstTask;
+    w.firstTask = null;
+    w.unlock(); // allow interrupts
+    boolean completedAbruptly = true;
+    try {
+        while (task != null || (task = getTask()) != null) {
+            w.lock();
+            // If pool is stopping, ensure thread is interrupted;
+            // if not, ensure thread is not interrupted.  This
+            // requires a recheck in second case to deal with
+            // shutdownNow race while clearing interrupt
+            // 如果线程池正在关闭，需要确保线程被中断，否则需要清除线程中断状态
+            if ((runStateAtLeast(ctl.get(), STOP) ||
+                 (Thread.interrupted() &&
+                  runStateAtLeast(ctl.get(), STOP))) &&
+                !wt.isInterrupted())
+                wt.interrupt();
+            // 任务执行
+            try {
+                // 任务前处理
+                beforeExecute(wt, task);
+                Throwable thrown = null;
+                try {
+                    task.run();
+                // 上面提到的异常处理
+                } catch (RuntimeException x) {
+                    thrown = x; throw x;
+                } catch (Error x) {
+                    thrown = x; throw x;
+                } catch (Throwable x) {
+                    thrown = x; throw new Error(x);
+                } finally {
+                    // 任务后处理
+                    afterExecute(task, thrown);
+                }
+            } finally {
+                task = null;
+                w.completedTasks++;
+                w.unlock();
+            }
+        }
+        completedAbruptly = false;
+    } finally {
+        // worker销毁处理
+        processWorkerExit(w, completedAbruptly);
+    }
+}
+```
