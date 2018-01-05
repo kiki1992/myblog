@@ -1,5 +1,5 @@
 ---
-title: ThreadPoolExecutor源码笔记(更新中)
+title: ThreadPoolExecutor源码笔记
 date: 2018-01-03 15:28:32
 summary: 本篇对ThreadPoolExecutor源码做了简单分析及整理。
 tags: 多线程
@@ -266,12 +266,25 @@ private long completedTaskCount;
 ThreadPoolExecutor使用Integer的低29位来存储Worker数量，而高位则被用来存储Executor的运行状态。相关变量如下：
 
 ```java
+// 用于控制记录utor状态及worker线程数
+private final AtomicInteger ctl = new AtomicInteger(ctlOf(RUNNING, 0));
 // 用于存储Worker数量的位数
 private static final int COUNT_BITS = Integer.SIZE - 3; 
 // 得到低位皆为1的结果，代表Executor的最大容量
 private static final int CAPACITY   = (1 << COUNT_BITS) - 1; 
 
-// 高位用于存储Executor的运行状态
+// 高位用于存储Executor的运行状态，各个状态代表的意义和转换过程如下：
+// RUNNING -- 接受新任务并执行队列中的任务
+// SHUTDOWN -- 不再接受新任务但继续执行队列中的任务
+// STOP -- 不再接受新任务也不会继续执行队列中的任务，同时还会中断正在执行的任务
+// TIDYING -- 所有任务已经终止，Worker线程已经不存在，处于该状态的线程将执行terminated() Hook方法
+// TERMINATED -- terminated() Hook方法执行完成
+// ##状态转换过程##
+// RUNNING->SHUTDOWN:调用shutdown方法
+// RUNNING/SHUTDOWN->STOP:调用shutdownNow方法
+// SHUTDOWN->TIDYING:队列中任务执行完毕且所有Worker线程已经销毁
+// STOP->TIDYING:所有Worker线程已经销毁
+// TIDYING->TERMINATED:terminated() Hook方法完成执行
 private static final int RUNNING    = -1 << COUNT_BITS;
 private static final int SHUTDOWN   =  0 << COUNT_BITS;
 private static final int STOP       =  1 << COUNT_BITS;
@@ -283,6 +296,99 @@ private static final int TERMINATED =  3 << COUNT_BITS;
 
 ### 主要方法
 
+#### Executor/ExecutorService方法
+
+***execute***
+
+execute方法将使指定任务在未来某个时刻执行，如果任务无法被提交将由RejectedExecutionHandler作适当处理。
+
+```java
+public void execute(Runnable command) {
+    if (command == null)
+        throw new NullPointerException();
+  
+    int c = ctl.get();
+    // 首先，如果当前worker线程数小于核心线程数，则直接新增worker线程来执行指定任务。
+    // 在addWorker方法里会检查Executor，线程池状态，因此这里无需额外检查
+    if (workerCountOf(c) < corePoolSize) {
+        if (addWorker(command, true))
+            return;
+        c = ctl.get();
+    }
+    // 如果任务不能被直接执行，则尝试将其放入队列中
+    if (isRunning(c) && workQueue.offer(command)) {
+        int recheck = ctl.get();
+        // 将任务放入队列后如果executor状态发生变化，则任务将可能从队列中移除并拒绝。
+        // 另外，还需要检查是否需要新增worker线程来处理任务。
+        if (! isRunning(recheck) && remove(command))
+            reject(command);
+        else if (workerCountOf(recheck) == 0)
+            addWorker(null, false);
+    }
+    // 如果将任务放入队列的操作失败，则需要尝试新增worker线程来直接处理任务
+    // 如果到这一步新增Worker线程失败，说明executor已经关闭或者饱和，当前任务将被拒绝。
+    else if (!addWorker(command, false))
+        reject(command);
+}
+```
+
+***shutdown***
+
+shutdown方法将发起一个有序的关闭过程，已经提交的任务将被执行，而新任务的提交将被拒绝。
+
+```java
+public void shutdown() {
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        checkShutdownAccess();
+        advanceRunState(SHUTDOWN); 
+        interruptIdleWorkers(); // 给空闲线程发送中断信号
+        onShutdown(); // hook for ScheduledThreadPoolExecutor
+    } finally {
+        mainLock.unlock();
+    }
+    tryTerminate();
+}
+```
+
+***shutdownNow***
+
+shutdownNow方法将试图停止正在运行的任务，阻止等待中任务的执行，将这些任务从等待队列中移除并返回给调用者。本方法的其他特性和父类方法一致。
+
+```java
+public List<Runnable> shutdownNow() {
+    List<Runnable> tasks;
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        checkShutdownAccess();
+        advanceRunState(STOP);
+        interruptWorkers(); // 向所有启动的工作者线程发送中断信号
+        tasks = drainQueue(); //drainQueue方法将队列中的任务移除并添加到返回列表中
+    } finally {
+        mainLock.unlock();
+    }
+    tryTerminate();
+    return tasks;
+}
+
+    private List<Runnable> drainQueue() {
+        BlockingQueue<Runnable> q = workQueue;
+        ArrayList<Runnable> taskList = new ArrayList<Runnable>();
+        // 使用queue的drainTo方法将队列元素移动至指定集合
+        q.drainTo(taskList);
+        // 调用某些种类Queue的drainTo方法可能不能完全移除所有元素
+        // 这种情况需要逐个移除未被移除的元素
+        if (!q.isEmpty()) {
+            for (Runnable r : q.toArray(new Runnable[0])) {
+                if (q.remove(r))
+                    taskList.add(r);
+            }
+        }
+        return taskList;
+    }
+```
 #### Hook方法
 
 ThreadPoolExecutor提供了一系列可供子类重写的Hook方法，来实现对任务执行以及Executor关闭的监控管理等操作。
@@ -342,26 +448,74 @@ terminated方法在Executor终止时被调用，为了能适当地处理多重�
 
 
 
-#### 公共方法
+#### 线程池相关方法
 
-***getCompletedTaskCount***
+***prestartAllCoreThreads/prestartCoreThread/ensurePrestart***
 
-getCompletedTaskCount方法用于获取大致的任务完成数。
+采用默认策略时即便是核心线程也只有在真正有任务需要执行时才会被创建，调用本方法将重写这种默认策略，使核心线程提前启动，等待任务提交。
+
+另外还有prestartCoreThread和ensurePrestart方法用于启动单个核心线程。
 
 ```java
-public long getCompletedTaskCount() {
-    final ReentrantLock mainLock = this.mainLock;
-    mainLock.lock();
+public int prestartAllCoreThreads() {
+    int n = 0;
+    while (addWorker(null, true))
+        ++n;
+    return n;
+}
+void ensurePrestart() {
+  int wc = workerCountOf(ctl.get());
+  // 确保执行有一个线程启动
+  if (wc < corePoolSize)
+    addWorker(null, true);
+  else if (wc == 0)
+    addWorker(null, false);
+}
+public boolean prestartCoreThread() {
+  return workerCountOf(ctl.get()) < corePoolSize &&
+    addWorker(null, true);
+}
+```
+
+***remove***
+
+remove方法可以从队列中移除指定Runnable对象，但如果Runnable对象在被放入队列前经过包装将无法使用此方法移除，这种情况下可以使用purge方法。
+
+```java
+public boolean remove(Runnable task) {
+    boolean removed = workQueue.remove(task);
+    tryTerminate(); // In case SHUTDOWN and now empty
+    return removed;
+}
+```
+
+***purge***
+
+purge方法尝试从队列中移除所有已经取消的Future任务。本方法可能因为执行过程中受到其他线程干扰而失败。当发生干扰后，本方法会采用一种较慢的方式来继续执行移除处理。
+
+```java
+public void purge() {
+    final BlockingQueue<Runnable> q = workQueue;
     try {
-        long n = completedTaskCount;
-        // 由于worker中的任务完成数只有当worker终止时才会更新到completedTaskCount
-        // 这里需要遍历所有worker获得实际的任务完成数
-        for (Worker w : workers)
-            n += w.completedTasks;
-        return n;
-    } finally {
-        mainLock.unlock();
+        // 首先尝试用迭代器移除取消任务
+        Iterator<Runnable> it = q.iterator();
+        while (it.hasNext()) {
+            Runnable r = it.next();
+            if (r instanceof Future<?> && ((Future<?>)r).isCancelled())
+                it.remove();
+        }
+    } catch (ConcurrentModificationException fallThrough) {
+        // Take slow path if we encounter interference during traversal.
+        // Make copy for traversal and call remove for cancelled entries.
+        // The slow path is more likely to be O(N*N).
+        // 如果迭代移除过程中受到其他线程干扰，将使用队列的拷贝遍历任务并调用
+        // 队列的remove方法移除取消任务
+        for (Object r : q.toArray())
+            if (r instanceof Future<?> && ((Future<?>)r).isCancelled())
+                q.remove(r);
     }
+
+    tryTerminate(); // In case SHUTDOWN and now empty
 }
 ```
 
@@ -513,6 +667,7 @@ final void runWorker(Worker w) {
             // requires a recheck in second case to deal with
             // shutdownNow race while clearing interrupt
             // 如果线程池正在关闭，需要确保线程被中断，否则需要清除线程中断状态
+            // 这里保证了只有线程池的关闭操作才会影响到后续任务的执行
             if ((runStateAtLeast(ctl.get(), STOP) ||
                  (Thread.interrupted() &&
                   runStateAtLeast(ctl.get(), STOP))) &&
@@ -546,6 +701,199 @@ final void runWorker(Worker w) {
     } finally {
         // worker销毁处理
         processWorkerExit(w, completedAbruptly);
+    }
+}
+```
+
+***getTask***
+
+getTask方法会根据当前配置决定在获取任务时是阻塞还是超时等待。如果worker线程因为以下原因需要终止则方法将返回null。
+
+1.当前worker线程数大于maximumPoolSize（调用setMaximumPoolSize将maximumPoolSize设为一个较小值）
+
+2.线程池已经停止。
+
+3.线程池关闭并且队列为空。
+
+4.当前worker等待任务超时+超时worker在超时等待开始和结束时都满足需要被终止的条件（需要满足allowCoreThreadTimeOut || workerCount > corePoolSize）+如果队列非空当前worker不是线程池中最后一个worker线程。
+
+```java
+private Runnable getTask() {
+    boolean timedOut = false; // Did the last poll() time out?
+
+    for (;;) {
+        int c = ctl.get();
+        int rs = runStateOf(c);
+
+        // Check if queue empty only if necessary.
+        // 如果Executor已经停止服务或者Executor已经关闭且任务队列为空
+        // 则当前worker可以销毁
+        if (rs >= SHUTDOWN && (rs >= STOP || workQueue.isEmpty())) {
+            decrementWorkerCount();
+            return null;
+        }
+
+        int wc = workerCountOf(c);
+
+        // Are workers subject to culling?
+        // 如果允许核心线程超时/当前worker线程数已经超过核心线程数，则执行的是超时等待
+        boolean timed = allowCoreThreadTimeOut || wc > corePoolSize;
+
+        // 满足上述1，4条件则可以销毁当前Worker线程
+        if ((wc > maximumPoolSize || (timed && timedOut))
+            && (wc > 1 || workQueue.isEmpty())) {
+            if (compareAndDecrementWorkerCount(c))
+                return null;
+            continue;
+        }
+
+        try {
+            Runnable r = timed ?
+                workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS) :
+                workQueue.take();
+            if (r != null)
+                return r;
+            timedOut = true;
+        } catch (InterruptedException retry) {
+            timedOut = false;
+        }
+    }
+}
+```
+
+***interruptIdleWorkers/interruptWorkers***
+
+interruptIdleWorkers方法将给那些正在等待任务的线程发送中断信号，线程在接收到信号后可以检查当前终止状态及配置的变化来调整自身行为。
+
+这里需要注意的是入参的onlyOne，如果onlyOne为true，则方法只会像至多一个等待线程发送中断信号，随后中断信号将从此线程向其他等待线程扩散。这是因为每个worker线程在销毁是都会调用tryTerminate方法，而在tryTerminate方法又会调用到本方法。
+
+interruptWorkers方法将给所有已经启动的工作线程发送中断信号。
+
+```java
+private void interruptIdleWorkers(boolean onlyOne) {
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        for (Worker w : workers) {
+            Thread t = w.thread;
+            //tryLock成功代表线程目前无任务正在执行
+            if (!t.isInterrupted() && w.tryLock()) { 
+                try {
+                    t.interrupt();
+                } catch (SecurityException ignore) {
+                } finally {
+                    w.unlock();
+                }
+            }
+            if (onlyOne)
+                break;
+        }
+    } finally {
+        mainLock.unlock();
+    }
+}
+
+private void interruptWorkers() {
+  final ReentrantLock mainLock = this.mainLock;
+  mainLock.lock();
+  try {
+    for (Worker w : workers)
+      w.interruptIfStarted();
+  } finally {
+    mainLock.unlock();
+  }
+}
+```
+
+***processWorkerExit***
+
+processWorkerExit方法的主要职责是清理和记录即将销毁的worker线程，本方法的调用只会由worker线程发起。
+
+本方法会把当前worker线程从全局的worker Set中移除，并检查线程池是否需要关闭，是否需要新增worker线程来替代当前worker线程。
+
+```java
+private void processWorkerExit(Worker w, boolean completedAbruptly) {
+    // 如果Worker线程因为异常而需要被销毁，需要调整worker线程总数
+    if (completedAbruptly) // If abrupt, then workerCount wasn't adjusted
+        decrementWorkerCount(); // decrementWorkerCount方法会执行死循环直到调整成功
+
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        completedTaskCount += w.completedTasks;
+        workers.remove(w);
+    } finally {
+        mainLock.unlock();
+    }
+
+    tryTerminate();
+
+    int c = ctl.get();
+    // Executor尚未关闭，判断是否需要新增worker线程
+    if (runStateLessThan(c, STOP)) {
+        // 如果当前worker线程因为异常退出，需要新增Worker线程
+        // 否则根据线程池及队列情况判断是否需要新增
+        if (!completedAbruptly) {
+            int min = allowCoreThreadTimeOut ? 0 : corePoolSize;
+            if (min == 0 && ! workQueue.isEmpty())
+                min = 1;
+            if (workerCountOf(c) >= min)
+                return; // replacement not needed
+        }
+        addWorker(null, false);
+    }
+}
+
+private void decrementWorkerCount() {
+  do {} while (! compareAndDecrementWorkerCount(ctl.get()));
+}
+```
+**Executor生命周期相关方法**
+
+***tryTerminate***
+
+tryTerminate方法会在满足以下任意条件时将executor状态设置为TERMINATED：
+
+1.executor已经关闭，并且线程池和队列都为空
+
+2.executor已经停止并且线程池为空
+
+如果不满足以上两种情况但需要终止executor时，将会检查是否还有worker线程存在，如果还有Worker线程，本方法会向任一空闲线程发送中断信号，并由该线程负责将中断信号扩散。
+
+```java
+final void tryTerminate() {
+    for (;;) {
+        int c = ctl.get();
+        // 如果不满足executor终止条件，直接返回
+        if (isRunning(c) ||
+            runStateAtLeast(c, TIDYING) ||
+            (runStateOf(c) == SHUTDOWN && ! workQueue.isEmpty()))
+            return;
+        // 如果executor需要终止，向任一worker线程发送中断信号
+        if (workerCountOf(c) != 0) { // Eligible to terminate
+            interruptIdleWorkers(ONLY_ONE);
+            return;
+        }
+
+        final ReentrantLock mainLock = this.mainLock;
+        mainLock.lock();
+        try {
+            // 首先尝试将状态修改为TIDYING，失败则重试
+            if (ctl.compareAndSet(c, ctlOf(TIDYING, 0))) {
+                try {
+                    // 执行终止回调方法
+                    terminated();
+                } finally {
+                    ctl.set(ctlOf(TERMINATED, 0));
+                    // 向所有等待锁的线程发送信号
+                    termination.signalAll();
+                }
+                return;
+            }
+        } finally {
+            mainLock.unlock();
+        }
+        // else retry on failed CAS
     }
 }
 ```
