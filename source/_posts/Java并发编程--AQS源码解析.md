@@ -331,6 +331,8 @@ protected boolean tryReleaseShared(int arg) {
 }
 ```
 
+***
+
 ### 同步等待队列相关操作
 
 #### 入列
@@ -383,7 +385,7 @@ private Node enq(final Node node) {
 }
 ```
 
-
+***
 
 ### 线程阻塞/唤醒相关操作
 
@@ -488,6 +490,8 @@ private void setHeadAndPropagate(Node node, int propagate) {
 }
 ```
 
+***
+
 ### 等待条件
 
 > * AQS中的等待条件类ConditionObject内部维护了一个条件等待队列，当调用await相关方法时线程会被包装成等待Node并放入队列，并在其他线程调用signal或signalAll方法时从等待队列中转移至AQS类中维护的同步等待队列中。
@@ -590,4 +594,33 @@ private void doSignalAll(Node first) {
 	} while (first != null);
 }
 ```
+
+***
+
+### 扩展知识 -- （1）LockSupport
+
+上面的代码中多处用到了LockSupport类的park/unpark方法来实现线程的阻塞和唤醒，下面就来了解一下LockSupport类具体是如何定义的。
+
+#### 概要
+
+> * LockSupport使用一个许可和使用本类方法的线程关联，这和Semaphore类似但也有不同的地方，在Semaphore中许可可以累积而LockSupport中针对每个线程的许可最多只有1个。
+> * 使用LockSupport时需要注意的是，这个类一般都是用来配合实现锁或者其他同步类的，其本身对于大多数并发控制应用来说都是没什么作用的。
+
+#### park阻塞方法
+
+LockSupport类中定义了几种类型的park方法，包括支持超时等待，支持指定监控用Blocker对象的方法。一旦调用了park方法并且在没有许可存在的情况下（如果其他线程先调用了唤醒本线程的unpark方法，调用park方法将不会阻塞）线程就会阻塞，直到以下三种情况发生：
+
+1.其他线程调用park方法 2.其他线程调用中断方法 3.方法不明原因返回orz
+
+正是因为存在第三种情况，所以一般需要在判断阻塞条件的死循环中使用park方法，就像下面这样：
+
+```java
+while(needBlock()) {
+    LockSupport.park(this);
+}
+```
+
+#### unpark唤醒方法
+
+调用unpark方法将给予指定线程一个许可，使其结束阻塞。
 
