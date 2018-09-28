@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document id="root_doc">
+<Schema name="gadm36_FRA_5" id="gadm36_FRA_5">
+	<SimpleField name="NAME_0" type="string"></SimpleField>
+	<SimpleField name="NAME_1" type="string"></SimpleField>
+	<SimpleField name="NAME_2" type="string"></SimpleField>
+	<SimpleField name="NAME_3" type="string"></SimpleField>
+	<SimpleField name="NAME_4" type="string"></SimpleField>
+	<SimpleField name="NAME_5" type="string"></SimpleField>
+</Schema>
+<Folder><name>gadm36_FRA_5</name>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#gadm36_FRA_5">
+		<SimpleData name="NAME_0">France</SimpleData>
+		<SimpleData name="NAME_1">Auvergne-Rhône-Alpes</SimpleData>
+		<SimpleData name="NAME_2">Ain</SimpleData>
+		<SimpleData name="NAME_3">Belley</SimpleData>
+		<SimpleData name="NAME_4">Ambérieu-en-Bugey</SimpleData>
+		<SimpleData name="NAME_5">Ambérieu-en-Bugey</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><Polygon><outerBoundaryIs><LinearRing><coordinates>5.41353321075445,45.9788970947266 5.4088196754455,45.9420623779297 5.39426279068005,45.9398994445801 5.38619089126593,45.9309272766114 5.37421512603771,45.9367485046388 5.37270450592052,45.9433364868163 5.34504556655889,45.9506607055665 5.34128093719494,45.9483871459962 5.32742595672607,45.9563865661622 5.33075904846203,45.9756240844727 5.33761596679682,45.9840507507325 5.34748649597162,45.9824752807617 5.37827444076544,45.9742393493653 5.39628553390503,45.978370666504 5.39695978164673,45.981689453125 5.41353321075445,45.9788970947266</coordinates></LinearRing></outerBoundaryIs></Polygon></MultiGeometry>
+  </Placemark>
+</Folder>
+</Document></kml>
